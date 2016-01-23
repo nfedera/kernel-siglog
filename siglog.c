@@ -31,7 +31,7 @@ MODULE_LICENSE("GPL");
 
 static char *sctaddress = NULL;
 
-module_param(sctaddress, charp, S_IRUGO | S_IWUSR);
+module_param(sctaddress, charp, S_IRUGO);
 MODULE_PARM_DESC(sctaddress, "Address of the system call table");
 
 struct siglog_t {
