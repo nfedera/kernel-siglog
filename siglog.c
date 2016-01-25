@@ -14,6 +14,7 @@
  */
 
 #include <linux/version.h>
+#include <linux/utsname.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/time.h>
@@ -22,6 +23,7 @@
 #include <asm/cacheflush.h>
 #include <linux/syscalls.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 
 #define MAXLOGENTRIES 10000
 
@@ -102,6 +104,45 @@ static const struct file_operations siglog_proc_fops = {
 	.release    = single_release,
 };
 
+
+static struct file* siglog_file_open(const char *filename, int flags, int mode) {
+	struct file *fs = NULL;
+	mm_segment_t orgfs;
+
+	if (!filename || !*filename) {
+		return NULL;
+	}
+
+	orgfs = get_fs();
+	set_fs(KERNEL_DS);
+	fs = filp_open(filename, flags, mode);
+	set_fs(orgfs);
+	if (IS_ERR(fs)) {
+		return NULL;
+	}
+	return fs;
+}
+
+static ssize_t siglog_file_read(struct file *fs, void *buf, size_t count) {
+	mm_segment_t orgfs;
+	ssize_t ret;
+
+	if (!fs || !fs->f_op || !fs->f_op->read) {
+		return -1;
+	}
+
+	orgfs = get_fs();
+	set_fs(KERNEL_DS);
+
+	ret = fs->f_op->read(fs, buf, count, &fs->f_pos);
+
+	set_fs(orgfs);
+	return ret;
+}
+
+static void siglog_file_close(struct file *fs) {
+    filp_close(fs, NULL);
+}
 
 static unsigned long **get_sys_call_table(unsigned long ptr) {
 	unsigned long *p = (unsigned long *)ptr;
@@ -204,24 +245,94 @@ out:
 	return ret;
 }
 
+static unsigned long detect_system_call_table_address(void) {
+	unsigned long sct = 0;
+	struct file *fs = NULL;
+	char *map = NULL;
+	char *buf = NULL;
+	char *p;
+	size_t bufsz = 4 * 1024 * 1024;
+	size_t mapsz = PATH_MAX;
+	int r;
+
+	if (!(buf = kzalloc(bufsz, GFP_KERNEL))) {
+		printk(KERN_DEBUG "siglog: failed to allocate read buffer\n");
+		goto out;
+	}
+
+	if (!(map = kzalloc(mapsz, GFP_KERNEL))) {
+		printk(KERN_DEBUG "siglog: failed to allocate map buffer\n");
+		goto out;
+	}
+
+
+	strncat(map, "/boot/System.map-", 17);
+	strncat(map, utsname()->release, mapsz - strlen(utsname()->release) - 1);
+
+	printk(KERN_DEBUG "siglog: using system map file [%s] for auto detection\n", map);
+
+	if (!(fs = siglog_file_open(map, O_RDONLY, 0))) {
+		goto out;
+	}
+
+	r = siglog_file_read(fs, buf, bufsz - 1);
+	if (r < 1 * 1024 * 1024) {
+		goto out;
+	}
+
+	if (!(p = strstr(buf, " R sys_call_table\n"))) {
+		goto out;
+	}
+
+	*p = 0;
+	if ((p - buf) < 18 || *(p - 17) != '\n') {
+		goto out;
+	}
+	p -= 18;
+	p[0] = '0';
+	p[1] = 'x';
+
+	sct = simple_strtoul(p, NULL, 16);
+
+out:
+	if (map) {
+		kfree(map);
+	}
+	if (buf) {
+		kfree(buf);
+	}
+	if (fs) {
+		siglog_file_close(fs);
+	}
+
+	if (!sct) {
+		printk(KERN_DEBUG "siglog: auto detection failed\n");
+	} else {
+		printk(KERN_DEBUG "siglog: auto detection succeeded: 0x%p\n", (void*)sct);
+	}
+
+	return sct;
+}
+
+
 static int __init siglog_init(void) {
 	unsigned long sct;
 
 	if (!sctaddress) {
-		printk(KERN_DEBUG "siglog: missing required module parameter\n");
-		return -EINVAL;
+		printk(KERN_DEBUG "siglog: sctaddress not specified, trying auto detection\n");
+		if (!(sct = detect_system_call_table_address())) {
+			printk(KERN_DEBUG "siglog: autodetection failed\n");
+			return -EINVAL;
+		}
+	} else {
+		sct = simple_strtoul(sctaddress, NULL, 16);
+		printk(KERN_DEBUG "siglog: specified syscall table address: 0x%p\n", (unsigned long*)sct);
 	}
-
-	sct = simple_strtoul(sctaddress, NULL, 16);
-
-	printk(KERN_DEBUG "siglog: specified syscall table address: 0x%p\n", (unsigned long*)sct);
 
 	if (!(syscall_table = (void **)get_sys_call_table(sct))) {
 		printk(KERN_DEBUG "siglog: could not verify the system call table address\n");
-		return -1;
+		return -EINVAL;
 	}
-
-	printk(KERN_DEBUG "siglog: successfully verified the specified system call table address\n");
 
 	memset(siglog, 0, sizeof(siglog));
 
