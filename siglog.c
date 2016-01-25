@@ -59,15 +59,18 @@ static int (*orig_sys_kill)(pid_t pid, int sig);
 
 
 static int siglog_proc_show(struct seq_file *sf, void *v) {
-	int i;
+	int i = 0;
+	int c = 0;
 	struct tm tm;
-
+	unsigned int cnt = atomic_read(&siglog_cnt);
 	int tzoffset = sys_tz.tz_minuteswest * -60;
 
-	for (i = 0; i < MAXLOGENTRIES; i++) {
-		if (!siglog[i].time.tv_sec) {
-			break;
-		}
+	if (cnt > MAXLOGENTRIES) {
+		i = cnt % MAXLOGENTRIES;
+		cnt = MAXLOGENTRIES;
+	}
+
+	for (c = 0; c < cnt; c++) {
 		time_to_tm(siglog[i].time.tv_sec, tzoffset, &tm);
 		siglog[i].scomm[TASK_COMM_LEN-1] = 0;
 		siglog[i].tcomm[TASK_COMM_LEN-1] = 0;
@@ -80,6 +83,10 @@ static int siglog_proc_show(struct seq_file *sf, void *v) {
 				siglog[i].suid,
 				siglog[i].tpid, siglog[i].tcomm,
 				siglog[i].rval);
+
+		if (++i >= MAXLOGENTRIES) {
+			i = 0;
+		}
 	}
 	return 0;
 }
@@ -170,7 +177,7 @@ static void *replace_system_call(int index, void *new_fn) {
 		write_cr0(cr0 & ~0x10000);
 	}
 
-	page = PAGE_ALIGN((unsigned long)&syscall_table[index] - PAGE_SIZE);
+	page = PAGE_ALIGN(1 + (unsigned long)&syscall_table[index]) - PAGE_SIZE;
 
 	if (set_memory_rw(page, 1)) {
 		printk(KERN_DEBUG "siglog: set_memory_rw failed\n");
@@ -197,7 +204,7 @@ out:
 	return ret;
 }
 
-static int __init syscall_init(void) {
+static int __init siglog_init(void) {
 	unsigned long sct;
 
 	if (!sctaddress) {
@@ -227,10 +234,10 @@ static int __init syscall_init(void) {
 	return 0;
 }
 
-static void __exit syscall_release(void) {
+static void __exit siglog_release(void) {
 	remove_proc_entry("siglog", NULL);
 	replace_system_call(__NR_kill, orig_sys_kill);
 }
 
-module_init(syscall_init);
-module_exit(syscall_release);
+module_init(siglog_init);
+module_exit(siglog_release);
