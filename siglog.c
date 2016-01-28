@@ -180,7 +180,18 @@ static void copy_task_comm_via_pid(char *buffer, int pid) {
 }
 
 static int hooked_sys_kill(pid_t pid, int sig) {
-	struct siglog_t *log = get_siglog_slot();
+	struct siglog_t *log;
+
+	/* set the following define to 0 if you want to spam the log with
+           0 signals which are only used to check if a process is running or to test
+           if the calling task has permission to send signals to another process */
+#if 1
+	if (sig == 0) {
+		return orig_sys_kill(pid, sig);
+	}
+#endif
+
+	log = get_siglog_slot();
 
 	getnstimeofday(&log->time);
 	log->spid = task_tgid_vnr(current);
