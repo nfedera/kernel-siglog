@@ -46,17 +46,17 @@ module_param(sctaddress, charp, S_IRUGO);
 MODULE_PARM_DESC(sctaddress, "Address of the system call table");
 
 struct siglog_t {
-	int   scnr;
+	int scnr;
 	struct timespec time;
 	pid_t spid;
 	pid_t stid;
 	uid_t suid;
 	pid_t tpid;
 	pid_t ttid;
-	int   snum;
-	int   rval;
-	char  scomm[TASK_COMM_LEN];
-	char  tcomm[TASK_COMM_LEN];
+	int snum;
+	int rval;
+	char scomm[TASK_COMM_LEN];
+	char tcomm[TASK_COMM_LEN];
 };
 
 struct siglog_t siglog[MAXLOGENTRIES];
@@ -204,8 +204,8 @@ static int hooked_sys_tgkill(pid_t tgid, pid_t pid, int sig) {
 
 	getnstimeofday(&log->time);
 	log->scnr = __NR_tgkill;
-        log->spid = task_tgid_vnr(current);
-        log->stid = task_pid_vnr(current);
+	log->spid = task_tgid_vnr(current);
+	log->stid = task_pid_vnr(current);
 #if defined(CONFIG_UIDGID_STRICT_TYPE_CHECKS) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
 	log->suid = current_uid().val;
 #else
