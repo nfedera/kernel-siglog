@@ -31,17 +31,28 @@ MODULE_AUTHOR ("Norbert Federa <norbert.federa@gmail.com>");
 MODULE_DESCRIPTION("Record kill system calls in /proc/siglog");
 MODULE_LICENSE("GPL");
 
+
+/***
+ * enable the following define if you want to spam the log with
+ * 0 signals which are only used to check if a process is running or to test
+ * if the calling task has permission to send signals to another process
+ */
+
+/* #define SIGLOG_RECORD_SIGNULL */
+
 static char *sctaddress = NULL;
 
 module_param(sctaddress, charp, S_IRUGO);
 MODULE_PARM_DESC(sctaddress, "Address of the system call table");
 
 struct siglog_t {
+	int   scnr;
 	struct timespec time;
 	pid_t spid;
 	pid_t stid;
 	uid_t suid;
 	pid_t tpid;
+	pid_t ttid;
 	int   snum;
 	int   rval;
 	char  scomm[TASK_COMM_LEN];
@@ -56,8 +67,8 @@ extern struct timezone sys_tz;
 
 static void **syscall_table;
 
-static int (*orig_sys_kill)(pid_t pid, int sig);
-
+static int (*orig_sys_kill)(pid_t pid, int sig) = NULL;
+static int (*orig_sys_tgkill)(pid_t tgid, pid_t pid, int sig) = NULL;
 
 
 static int siglog_proc_show(struct seq_file *sf, void *v) {
@@ -76,14 +87,15 @@ static int siglog_proc_show(struct seq_file *sf, void *v) {
 		time_to_tm(siglog[i].time.tv_sec, tzoffset, &tm);
 		siglog[i].scomm[TASK_COMM_LEN-1] = 0;
 		siglog[i].tcomm[TASK_COMM_LEN-1] = 0;
-		seq_printf(sf, "%lu-%02d-%02d/%02d:%02d:%02d/%09lu: sig %02d from %05d:%05d [%-15s] (uid:%05d) to %6d [%-15s] returned %d\n",
+		seq_printf(sf, "%lu-%02d-%02d/%02d:%02d:%02d/%09lu: [%03d] sig %02d from %05d:%05d [%-15s] (uid:%05d) to %6d:%05d [%-15s] returned %d\n",
 				tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
 				tm.tm_hour, tm.tm_min, tm.tm_sec,
 				siglog[i].time.tv_nsec,
+				siglog[i].scnr,
 				siglog[i].snum,
 				siglog[i].spid, siglog[i].stid, siglog[i].scomm,
 				siglog[i].suid,
-				siglog[i].tpid, siglog[i].tcomm,
+				siglog[i].tpid, siglog[i].ttid, siglog[i].tcomm,
 				siglog[i].rval);
 
 		if (++i >= MAXLOGENTRIES) {
@@ -179,13 +191,42 @@ static void copy_task_comm_via_pid(char *buffer, int pid) {
 	}
 }
 
+static int hooked_sys_tgkill(pid_t tgid, pid_t pid, int sig) {
+	struct siglog_t *log;
+
+	printk(KERN_DEBUG "siglog: hooked_sys_tgkill: tgid:%d pid:%d sig:%d\n", tgid, pid, sig);
+#ifndef SIGLOG_RECORD_SIGNULL
+	if (sig == 0) {
+		return orig_sys_tgkill(tgid, pid, sig);
+	}
+#endif
+	log = get_siglog_slot();
+
+	getnstimeofday(&log->time);
+	log->scnr = __NR_tgkill;
+        log->spid = task_tgid_vnr(current);
+        log->stid = task_pid_vnr(current);
+#if defined(CONFIG_UIDGID_STRICT_TYPE_CHECKS) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
+	log->suid = current_uid().val;
+#else
+	log->suid = current_uid();
+#endif
+	log->tpid = tgid; /* tgid is the thread group (i.e., process) */
+	log->ttid = pid; /* pid is the thread pid */
+	log->snum = sig;
+
+	copy_task_comm_via_pid(log->scomm, log->spid);
+	copy_task_comm_via_pid(log->tcomm, log->tpid);
+
+	log->rval = orig_sys_tgkill(tgid, pid, sig);
+
+	return log->rval;;
+}
+
 static int hooked_sys_kill(pid_t pid, int sig) {
 	struct siglog_t *log;
 
-	/* set the following define to 0 if you want to spam the log with
-           0 signals which are only used to check if a process is running or to test
-           if the calling task has permission to send signals to another process */
-#if 1
+#ifndef SIGLOG_RECORD_SIGNULL
 	if (sig == 0) {
 		return orig_sys_kill(pid, sig);
 	}
@@ -194,6 +235,7 @@ static int hooked_sys_kill(pid_t pid, int sig) {
 	log = get_siglog_slot();
 
 	getnstimeofday(&log->time);
+	log->scnr = __NR_kill;
 	log->spid = task_tgid_vnr(current);
 	log->stid = task_pid_vnr(current);
 #if defined(CONFIG_UIDGID_STRICT_TYPE_CHECKS) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
@@ -348,6 +390,13 @@ static int __init siglog_init(void) {
 	memset(siglog, 0, sizeof(siglog));
 
 	if (!(orig_sys_kill = replace_system_call(__NR_kill, hooked_sys_kill))) {
+		printk(KERN_DEBUG "siglog: failed to hook sys_kill\n");
+		return -1;
+	}
+
+	if (!(orig_sys_tgkill = replace_system_call(__NR_tgkill, hooked_sys_tgkill))) {
+		printk(KERN_DEBUG "siglog: failed to hook sys_tgkill\n");
+		replace_system_call(__NR_kill, orig_sys_kill);
 		return -1;
 	}
 
@@ -359,6 +408,7 @@ static int __init siglog_init(void) {
 static void __exit siglog_release(void) {
 	remove_proc_entry("siglog", NULL);
 	replace_system_call(__NR_kill, orig_sys_kill);
+	replace_system_call(__NR_tgkill, orig_sys_tgkill);
 }
 
 module_init(siglog_init);
