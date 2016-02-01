@@ -166,13 +166,6 @@ static unsigned long **get_sys_call_table(unsigned long ptr) {
 	return NULL;
 }
 
-static struct siglog_t *get_siglog_slot(void) {
-	unsigned int cnt = atomic_inc_return(&siglog_cnt);
-	unsigned int pos = (cnt - 1) % MAXLOGENTRIES;
-	memset(&siglog[pos], 0, sizeof(struct siglog_t));
-	return &siglog[pos];
-}
-
 static void copy_task_comm_via_pid(char *buffer, int pid) {
 	struct pid *ps = NULL;
 	struct task_struct *ts = NULL;
@@ -191,19 +184,13 @@ static void copy_task_comm_via_pid(char *buffer, int pid) {
 	}
 }
 
-static int hooked_sys_tgkill(pid_t tgid, pid_t pid, int sig) {
-	struct siglog_t *log;
-
-	printk(KERN_DEBUG "siglog: hooked_sys_tgkill: tgid:%d pid:%d sig:%d\n", tgid, pid, sig);
-#ifndef SIGLOG_RECORD_SIGNULL
-	if (sig == 0) {
-		return orig_sys_tgkill(tgid, pid, sig);
-	}
-#endif
-	log = get_siglog_slot();
-
+static struct siglog_t *get_siglog_slot(int scnr, pid_t pid, pid_t tid, int sig) {
+	unsigned int cnt = atomic_inc_return(&siglog_cnt);
+	unsigned int pos = (cnt - 1) % MAXLOGENTRIES;
+	struct siglog_t *log = &siglog[pos];
+	memset(log, 0, sizeof(struct siglog_t));
 	getnstimeofday(&log->time);
-	log->scnr = __NR_tgkill;
+	log->scnr = scnr;
 	log->spid = task_tgid_vnr(current);
 	log->stid = task_pid_vnr(current);
 #if defined(CONFIG_UIDGID_STRICT_TYPE_CHECKS) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
@@ -211,13 +198,25 @@ static int hooked_sys_tgkill(pid_t tgid, pid_t pid, int sig) {
 #else
 	log->suid = current_uid();
 #endif
-	log->tpid = tgid; /* tgid is the thread group (i.e., process) */
-	log->ttid = pid; /* pid is the thread pid */
+	log->tpid = pid;
+	log->ttid = tid;
 	log->snum = sig;
 
 	copy_task_comm_via_pid(log->scomm, log->spid);
 	copy_task_comm_via_pid(log->tcomm, log->tpid);
 
+	return log;
+}
+
+static int hooked_sys_tgkill(pid_t tgid, pid_t pid, int sig) {
+	struct siglog_t *log;
+
+#ifndef SIGLOG_RECORD_SIGNULL
+	if (sig == 0) {
+		return orig_sys_tgkill(tgid, pid, sig);
+	}
+#endif
+	log = get_siglog_slot(__NR_tgkill, tgid, pid, sig);
 	log->rval = orig_sys_tgkill(tgid, pid, sig);
 
 	return log->rval;;
@@ -231,24 +230,7 @@ static int hooked_sys_kill(pid_t pid, int sig) {
 		return orig_sys_kill(pid, sig);
 	}
 #endif
-
-	log = get_siglog_slot();
-
-	getnstimeofday(&log->time);
-	log->scnr = __NR_kill;
-	log->spid = task_tgid_vnr(current);
-	log->stid = task_pid_vnr(current);
-#if defined(CONFIG_UIDGID_STRICT_TYPE_CHECKS) || LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
-	log->suid = current_uid().val;
-#else
-	log->suid = current_uid();
-#endif
-	log->tpid = pid;
-	log->snum = sig;
-
-	copy_task_comm_via_pid(log->scomm, log->spid);
-	copy_task_comm_via_pid(log->tcomm, log->tpid);
-
+	log = get_siglog_slot(__NR_kill, pid, 0, sig);
 	log->rval = orig_sys_kill(pid, sig);
 
 	return log->rval;
