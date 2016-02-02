@@ -22,8 +22,7 @@
 #include <linux/seq_file.h>
 #include <asm/cacheflush.h>
 #include <linux/syscalls.h>
-#include <linux/sched.h>
-#include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 #define MAXLOGENTRIES 10000
 
@@ -285,20 +284,22 @@ static unsigned long detect_system_call_table_address(void) {
 	struct file *fs = NULL;
 	char *map = NULL;
 	char *buf = NULL;
-	char *p;
+	char *p = NULL;
 	size_t bufsz = 4 * 1024 * 1024;
 	size_t mapsz = PATH_MAX;
 	int r;
 
-	if (!(buf = kzalloc(bufsz, GFP_KERNEL))) {
+	if (!(buf = vmalloc(bufsz))) {
 		printk(KERN_DEBUG "siglog: failed to allocate read buffer\n");
 		goto out;
 	}
+	memset(buf, 0, bufsz);
 
-	if (!(map = kzalloc(mapsz, GFP_KERNEL))) {
+	if (!(map = vmalloc(mapsz))) {
 		printk(KERN_DEBUG "siglog: failed to allocate map buffer\n");
 		goto out;
 	}
+	memset(map, 0, mapsz);
 
 
 	strncat(map, "/boot/System.map-", 17);
@@ -312,15 +313,18 @@ static unsigned long detect_system_call_table_address(void) {
 
 	r = siglog_file_read(fs, buf, bufsz - 1);
 	if (r < 1 * 1024 * 1024) {
+		printk(KERN_DEBUG "siglog: system map file size mismatch\n");
 		goto out;
 	}
 
 	if (!(p = strstr(buf, " R sys_call_table\n"))) {
+		printk(KERN_DEBUG "siglog: sys_call_table token not found in system map file\n");
 		goto out;
 	}
 
 	*p = 0;
 	if ((p - buf) < 18 || *(p - 17) != '\n') {
+		printk(KERN_DEBUG "siglog: syntax error in system map file\n");
 		goto out;
 	}
 	p -= 18;
@@ -331,10 +335,10 @@ static unsigned long detect_system_call_table_address(void) {
 
 out:
 	if (map) {
-		kfree(map);
+		vfree(map);
 	}
 	if (buf) {
-		kfree(buf);
+		vfree(buf);
 	}
 	if (fs) {
 		siglog_file_close(fs);
@@ -356,8 +360,7 @@ static int __init siglog_init(void) {
 	if (!sctaddress) {
 		printk(KERN_DEBUG "siglog: sctaddress not specified, trying auto detection\n");
 		if (!(sct = detect_system_call_table_address())) {
-			printk(KERN_DEBUG "siglog: autodetection failed\n");
-			return -EINVAL;
+			return -1;
 		}
 	} else {
 		sct = simple_strtoul(sctaddress, NULL, 16);
@@ -366,7 +369,7 @@ static int __init siglog_init(void) {
 
 	if (!(syscall_table = (void **)get_sys_call_table(sct))) {
 		printk(KERN_DEBUG "siglog: could not verify the system call table address\n");
-		return -EINVAL;
+		return -1;
 	}
 
 	memset(siglog, 0, sizeof(siglog));
